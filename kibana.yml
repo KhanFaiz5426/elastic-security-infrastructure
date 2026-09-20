@@ -1,0 +1,20 @@
+xpack.encryptedSavedObjects.encryptionKey: "${KIBANA_ENCRYPTION_KEY}"
+server.host: "0.0.0.0"
+telemetry.enabled: "false"
+xpack.fleet.packages:
+  # Versions pinned to the values verified working in this deployment
+  # (STACK_VERSION 9.5.0) instead of floating "latest" tags.
+  - name: fleet_server
+    version: 1.6.1
+  - name: system
+    version: 2.22.4
+xpack.fleet.agentPolicies:
+  - name: Fleet-Server-Policy
+    id: fleet-server-policy
+    namespace: default
+    package_policies:
+      - name: fleet_server-1
+        package:
+          name: fleet_server
+
+

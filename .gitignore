@@ -1,0 +1,28 @@
+# Environment / secrets
+.env
+.env.*
+!.env.example
+.admin_creds
+
+# CA / enrollment artifacts copied out of the stack
+ca.crt
+*.crt
+*.key
+*.pem
+*.p12
+*.pfx
+.certs/
+
+# Local tooling / OS noise
+*.log
+*.zip
+*.swp
+.DS_Store
+.idea/
+.vscode/
+
+# Host-side audit trail for admin/destructive actions
+.logs/
+
+# Docker runtime data
+docker-compose.override.yml
