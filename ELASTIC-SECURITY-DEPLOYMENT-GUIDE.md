@@ -58,7 +58,7 @@ The guide covers the core Elastic SIEM deployment plus optional integration poin
 **1. Clone the repository and enter it:**
 
 ```bash
-git clone <repository-url> && cd elastic-security-infrastructure
+git clone https://github.com/KhanFaiz5426/elastic-security-infrastructure.git && cd elastic-security-infrastructure
 ```
 
 **2. Create `.env` from the template:**

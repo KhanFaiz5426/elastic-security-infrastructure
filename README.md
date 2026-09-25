@@ -199,7 +199,7 @@ brew install --cask docker
 
 ```bash
 # 1. Clone and enter the repository
-git clone <your-repo-url> elastic-security-infrastructure
+git clone https://github.com/KhanFaiz5426/elastic-security-infrastructure.git elastic-security-infrastructure
 cd elastic-security-infrastructure
 
 # 2. Create your configuration
