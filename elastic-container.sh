@@ -222,7 +222,7 @@ preflight() {
       echo "       Legacy docker-compose (v1): not installed"
     fi
     echo "       Verify with: docker compose version"
-    echo "       See README.md Prerequisites or Deployment Guide Phase 0 for installation"
+    echo "       See Deployment Guide Phase 0 (Step 0.6) for installation"
     rc=1
   fi
 
@@ -937,7 +937,7 @@ else
     echo ""
     echo "To verify: docker compose version"
     echo "To retry:  ./elastic-container.sh start"
-    echo "Install:   See README.md Prerequisites or Deployment Guide Phase 0"
+    echo "Install:   See Deployment Guide Phase 0 (Step 0.6) for OS-specific instructions"
     exit 2
     ;;
   esac
