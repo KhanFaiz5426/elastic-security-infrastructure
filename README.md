@@ -202,21 +202,24 @@ brew install --cask docker
 git clone https://github.com/KhanFaiz5426/elastic-security-infrastructure.git elastic-security-infrastructure
 cd elastic-security-infrastructure
 
-# 2. Create your configuration
+# 2. Restore executable permissions (required on filesystems that don't preserve Git mode bits)
+chmod +x elastic-container.sh set-static-ip.sh
+
+# 3. Create your configuration
 cp .env.example .env
 openssl rand -hex 32                        # generate an encryption key
 
-# 3. Edit .env — set at minimum:
+# 4. Edit .env — set at minimum:
 #    SIEM_IP, ELASTIC_PASSWORD, KIBANA_PASSWORD, KIBANA_ENCRYPTION_KEY
 nano .env
 
-# 4. (Optional) Run preflight checks
+# 5. (Optional) Run preflight checks
 ./elastic-container.sh preflight
 
-# 5. Start the stack
+# 6. Start the stack
 ./elastic-container.sh start
 
-# 6. Verify
+# 7. Verify
 ./elastic-container.sh status
 curl -sk https://127.0.0.1:8220/api/status
 ```

@@ -61,19 +61,25 @@ The guide covers the core Elastic SIEM deployment plus optional integration poin
 git clone https://github.com/KhanFaiz5426/elastic-security-infrastructure.git && cd elastic-security-infrastructure
 ```
 
-**2. Create `.env` from the template:**
+**2. Restore executable permissions (required on filesystems that don't preserve Git mode bits):**
+
+```bash
+chmod +x elastic-container.sh set-static-ip.sh
+```
+
+**3. Create `.env` from the template:**
 
 ```bash
 cp .env.example .env
 ```
 
-**3. Generate a Kibana encryption key:**
+**4. Generate a Kibana encryption key:**
 
 ```bash
 openssl rand -hex 32
 ```
 
-**4. Edit `.env` and set required values:**
+**5. Edit `.env` and set required values:**
 
 ```bash
 nano .env
@@ -81,7 +87,7 @@ nano .env
 
 Set at minimum: `SIEM_IP`, `ELASTIC_PASSWORD`, `KIBANA_PASSWORD`, `KIBANA_ENCRYPTION_KEY`.
 
-**5. Start the stack:**
+**6. Start the stack:**
 
 ```bash
 ./elastic-container.sh start
@@ -89,7 +95,7 @@ Set at minimum: `SIEM_IP`, `ELASTIC_PASSWORD`, `KIBANA_PASSWORD`, `KIBANA_ENCRYP
 
 Wait for `READY SET GO!` output (2–5 minutes).
 
-**6. Verify:**
+**7. Verify:**
 
 ```bash
 ./elastic-container.sh status
@@ -97,7 +103,7 @@ Wait for `READY SET GO!` output (2–5 minutes).
 
 All three containers should show `Up (healthy)` or `Up`.
 
-**7. Access Kibana:** Browse to `https://<YOUR_SIEM_IP>:5601`
+**8. Access Kibana:** Browse to `https://<YOUR_SIEM_IP>:5601`
 
 > [!NOTE]
 > The Quick Start skips prerequisite checks, certificate export, endpoint enrollment, telemetry verification, and detection-rule configuration. The full procedure in the detailed phases below covers all of these.
@@ -286,7 +292,19 @@ docker ps -a | grep ecp-
 
 # PHASE 2 — CONFIGURE FRESH ENVIRONMENT
 
-## Step 2.1: Create fresh .env from template
+## Step 2.1: Restore executable permissions (fresh clone / checkout)
+
+```bash
+chmod +x elastic-container.sh set-static-ip.sh
+```
+
+> **What it does:** Ensures the operator-facing scripts have executable permission. On filesystems or archive/checkout environments that do not preserve executable mode bits, this restores the Git-tracked executable mode before running deployment commands.
+
+> **Success:** `ls -l elastic-container.sh set-static-ip.sh` shows `-rwxr-xr-x` (or equivalent).
+
+---
+
+## Step 2.2: Create fresh .env from template
 
 ```bash
 cp .env.example .env
@@ -298,7 +316,7 @@ cp .env.example .env
 
 ---
 
-## Step 2.2: Generate Kibana encryption key
+## Step 2.3: Generate Kibana encryption key
 
 ```bash
 openssl rand -hex 32
