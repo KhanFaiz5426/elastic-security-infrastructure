@@ -210,6 +210,41 @@ ls -la .env.example
 
 ---
 
+## Step 0.6: Verify Docker and Docker Compose v2
+
+```bash
+docker version
+docker compose version
+```
+
+> **What it does:** Verifies Docker Engine and Docker Compose v2 plugin are installed and working.
+
+> **Success:** `docker version` shows client/server versions; `docker compose version` shows v2.x (e.g., `Docker Compose version v2.24.0`).
+
+> **If `docker compose version` fails:** Docker Compose v2 is not installed. Install it:
+
+> **Linux (Ubuntu/Debian):**
+> ```bash
+> sudo apt update
+> sudo apt install -y docker.io docker-compose-plugin
+> sudo usermod -aG docker "$USER"
+> newgrp docker
+> ```
+
+> **macOS:**
+> ```bash
+> brew install --cask docker
+> ```
+> Docker Compose v2 is included with Docker Desktop.
+
+> **Windows:**
+> Install Docker Desktop — it includes Docker Compose v2.
+
+> [!IMPORTANT]
+> Legacy `docker-compose` (v1) is NOT supported. This project uses `depends_on` conditions which require Compose v2 (Spec 2.1+).
+
+---
+
 # PHASE 1 — DESTROY OLD STACK
 
 ## Step 1.1: Stop all running containers

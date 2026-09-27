@@ -211,8 +211,18 @@ preflight() {
   if docker compose version &>/dev/null; then
     echo "${pass} Docker Compose (v2)"
   else
-    echo "${fail} Docker Compose v2 not available (docker compose version failed)"
-    echo "       Legacy docker-compose (v1) is not supported — this project requires Compose v2"
+    echo "${fail} Docker Compose v2 not available"
+    docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+    echo "       Docker version: ${docker_version}"
+    if command -v docker-compose &>/dev/null; then
+      legacy_version=$(docker-compose version --short 2>/dev/null || echo "unknown")
+      echo "       Legacy docker-compose (v1) found: ${legacy_version}"
+      echo "       Legacy v1 is NOT supported — this project requires Compose v2 (depends_on conditions)"
+    else
+      echo "       Legacy docker-compose (v1): not installed"
+    fi
+    echo "       Verify with: docker compose version"
+    echo "       See README.md Prerequisites or Deployment Guide Phase 0 for installation"
     rc=1
   fi
 
@@ -914,8 +924,20 @@ else
   case "${ACTION}" in
   help | "update-version" | "preflight") ;;
   *)
-    echo "elastic-container requires Docker Compose v2 (docker compose)."
-    echo "Legacy docker-compose (v1) is not supported — this project uses depends_on conditions."
+    docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
+    echo "ERROR: Docker Compose v2 (docker compose) is required but not available."
+    echo "Docker version: ${docker_version}"
+    if command -v docker-compose &>/dev/null; then
+      legacy_version=$(docker-compose version --short 2>/dev/null || echo "unknown")
+      echo "Legacy docker-compose (v1) detected: ${legacy_version}"
+      echo "Legacy v1 is NOT supported — this project uses depends_on conditions (Compose v2+)."
+    else
+      echo "Legacy docker-compose (v1): not installed"
+    fi
+    echo ""
+    echo "To verify: docker compose version"
+    echo "To retry:  ./elastic-container.sh start"
+    echo "Install:   See README.md Prerequisites or Deployment Guide Phase 0"
     exit 2
     ;;
   esac
