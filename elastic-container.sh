@@ -209,11 +209,10 @@ preflight() {
   fi
 
   if docker compose version &>/dev/null; then
-    echo "${pass} Docker Compose"
-  elif command -v docker-compose &>/dev/null; then
-    echo "${pass} Docker Compose (legacy)"
+    echo "${pass} Docker Compose (v2)"
   else
-    echo "${fail} Docker Compose not available"
+    echo "${fail} Docker Compose v2 not available (docker compose version failed)"
+    echo "       Legacy docker-compose (v1) is not supported — this project requires Compose v2"
     rc=1
   fi
 
@@ -909,15 +908,14 @@ fi
 
 ACTION="${*:-help}"
 
-if docker compose >/dev/null; then
+if docker compose version &>/dev/null; then
   COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null; then
-  COMPOSE="docker-compose"
 else
   case "${ACTION}" in
   help | "update-version" | "preflight") ;;
   *)
-    echo "elastic-container requires docker compose!"
+    echo "elastic-container requires Docker Compose v2 (docker compose)."
+    echo "Legacy docker-compose (v1) is not supported — this project uses depends_on conditions."
     exit 2
     ;;
   esac

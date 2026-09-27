@@ -188,11 +188,12 @@ newgrp docker
 **macOS:**
 
 ```bash
-brew install jq git curl docker-compose
+brew install jq git curl
 brew install --cask docker
 ```
 
-- `docker-compose-plugin` is required (not the legacy `docker-compose`)
+- Docker Compose v2 (`docker compose`) is required — included with Docker Desktop
+- Legacy `docker-compose` (v1) is NOT supported
 - Docker must have privileged access (follow Docker Desktop prompts on macOS)
 
 ## Quick Start
