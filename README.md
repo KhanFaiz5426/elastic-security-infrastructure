@@ -34,7 +34,7 @@ The framework is designed for security practitioners, researchers, and lab/homel
 - **Prebuilt detection rules** — bulk-enabled by OS (Windows, Linux, macOS) at first start via `.env` flags
 - **Parameterized networking** — all addressing driven from `.env`; supports NAT/management IPs and static IP configuration
 - **Security hardening** — password policy enforcement, credential isolation, TLS verification, destructive-action confirmation, and action audit logging
-- **Preflight validation** — prerequisite checks for Docker, tools, configuration, ports, disk, and memory before deployment
+- **Preflight validation** — host distribution detection plus Docker Engine, daemon, Compose v2, tools, configuration, ports, disk, and memory checks before deployment (read-only; never installs anything)
 - **Zeek integration** — optional Fleet-managed Zeek sensor support for network telemetry ingestion
 - **Operational safeguards** — `destroy` and `clear` require explicit typed confirmation; all administrative actions are logged
 
@@ -172,36 +172,192 @@ Rules requiring specific host-side configuration (Sysmon, PowerShell Script Bloc
 | **Destructive safety** | `destroy` and `clear` require typing `DESTROY` / `CLEAR` (all uppercase) to confirm; accidental execution aborts |
 | **Action audit trail** | `start`, `destroy`, and `clear` append timestamped entries to `.logs/actions.log` (gitignored) |
 | **Fleet auth isolation** | Fleet Server authenticates via a dedicated service token (least-privilege), not the `elastic` superuser |
-| **Preflight checks** | Validates Docker, tools, `.env`, password policy, network interfaces, ports, disk space, and memory before deployment |
+| **Preflight checks** | Detects the host distribution (read-only) and validates Docker Engine + daemon, Compose v2, tools, `.env`, password policy, network interfaces, ports, disk space, and memory before deployment |
 
-## Prerequisites
+## Prerequisites — Host Setup (Docker)
 
-**Linux (Ubuntu/Debian):**
+This project **never installs Docker for you**. Install Docker Engine and the
+Compose v2 plugin using your own distribution's method first, then verify.
+
+**Requirements (every distribution):**
+
+- Docker Engine with the daemon running
+- Docker Compose **v2** — `docker compose version` must work. The legacy
+  `docker-compose` (v1) binary is **not** supported by this project
+- `jq`, `curl`, `openssl`
+- 4 GB RAM and 20 GB free disk (recommended)
+- Linux or macOS
+
+> [!WARNING]
+> **Kali Linux (and other Debian derivatives):** never add Docker's *Ubuntu*
+> repository (`https://download.docker.com/linux/ubuntu`) on Kali. Its suite
+> would be your codename (`kali-rolling`), which does not exist in Ubuntu's
+> repository — `apt update` fails with 404 and `docker-ce` cannot install.
+> Use the Kali instructions below instead (Kali's own packages), or Docker's
+> **Debian** repository with Debian's current stable codename (e.g. `trixie`).
+
+### Ubuntu (26.04 / 24.04 / 22.04)
 
 ```bash
-# Install Docker Engine + Compose v2 plugin from Docker's official repository
+# Remove conflicting distro-packaged Docker components, if any are installed
+sudo apt remove -y docker.io docker-compose docker-compose-v2 docker-doc \
+  docker-buildx podman-docker containerd runc 2>/dev/null || true
+
+# Add Docker's official GPG key and apt repository
 sudo apt update
-sudo apt install -y ca-certificates curl gnupg lsb-release
+sudo apt install -y ca-certificates curl
 sudo install -m 0755 -d /etc/apt/keyrings
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-sudo chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
 sudo apt update
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin jq curl git
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
 sudo usermod -aG docker "$USER"
-newgrp docker
 ```
 
-**macOS:**
+Log out and back in for the `docker` group membership to take effect.
+([Docker docs: Ubuntu](https://docs.docker.com/engine/install/ubuntu/))
+
+### Debian (13 / 12)
+
+```bash
+sudo apt remove -y docker.io docker-compose docker-doc docker-buildx \
+  podman-docker containerd runc 2>/dev/null || true
+
+sudo apt update
+sudo apt install -y ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+> Derivatives of Debian (Kali, LMDE, …) must substitute `$(… $VERSION_CODENAME)`
+> above with the codename of the corresponding Debian release (e.g. `trixie`).
+> ([Docker docs: Debian](https://docs.docker.com/engine/install/debian/))
+
+### Kali Linux
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+- Kali's package is named `docker.io` (a different package already owns the
+  name `docker`); `docker-compose` in Kali's repos is Compose **v2** and
+  provides the `docker compose` plugin.
+- Optional alternative: Docker CE from Docker's **Debian** repository using
+  Debian's stable codename (`trixie`) — see the
+  [official Kali docs](https://www.kali.org/docs/containers/installing-docker-on-kali/).
+- Do **not** use the Ubuntu repository (see the warning above).
+
+### Fedora (44 / 43)
+
+```bash
+sudo dnf config-manager addrepo --from-repofile https://download.docker.com/linux/fedora/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+([Docker docs: Fedora](https://docs.docker.com/engine/install/fedora/))
+
+### RHEL (8 / 9 / 10)
+
+```bash
+sudo dnf -y install dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+Remove conflicting packages (`podman`, `runc`, old `docker*`) if `dnf`
+reports them, per [Docker docs: RHEL](https://docs.docker.com/engine/install/rhel/).
+
+### Rocky Linux
+
+```bash
+sudo dnf -y install dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/rhel/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+([Rocky docs: Docker](https://docs.rockylinux.org/gemstones/containers/docker/))
+
+### AlmaLinux
+
+```bash
+sudo dnf -y install dnf-plugins-core
+sudo dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+sudo dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+sudo systemctl enable --now docker
+sudo usermod -aG docker "$USER"
+```
+
+> [!NOTE]
+> Docker does not publish an AlmaLinux-specific installation page. AlmaLinux is
+> RHEL-compatible; the Docker **CentOS** repository above is the
+> community-documented approach for EL clones (best-effort).
+
+### Arch Linux
+
+```bash
+sudo pacman -S docker docker-compose
+sudo systemctl enable --now docker.service
+sudo usermod -aG docker "$USER"
+```
+
+Arch's `docker-compose` package ships the Compose v2 plugin
+(`docker compose`). ([ArchWiki: Docker](https://wiki.archlinux.org/title/Docker))
+
+### macOS
 
 ```bash
 brew install jq git curl
 brew install --cask docker
 ```
 
-- Docker Compose v2 (`docker compose`) is required — included with Docker Desktop
-- Legacy `docker-compose` (v1) is NOT supported
-- Docker must have privileged access (follow Docker Desktop prompts on macOS)
+Open Docker Desktop once and complete its setup; grant privileged access when
+prompted (Docker must have privileged access on macOS).
+
+### Verify (all platforms)
+
+```bash
+docker version            # client + server (daemon must be reachable)
+docker compose version    # must print "Docker Compose version v2.x"
+./elastic-container.sh preflight
+```
+
+`preflight` prints an `[OK]` / `[FAIL]` / `[WARN]` line per check — including
+your detected distribution and Docker/Compose status — and **never installs
+anything**. Run it after creating `.env` (see Quick Start); `start` runs it
+automatically before touching any containers.
 
 ## Quick Start
 
@@ -210,24 +366,21 @@ brew install --cask docker
 git clone https://github.com/KhanFaiz5426/elastic-security-infrastructure.git elastic-security-infrastructure
 cd elastic-security-infrastructure
 
-# 2. Restore executable permissions (required on filesystems that don't preserve Git mode bits)
-chmod +x elastic-container.sh set-static-ip.sh
-
-# 3. Create your configuration
+# 2. Create your configuration
 cp .env.example .env
 openssl rand -hex 32                        # generate an encryption key
 
-# 4. Edit .env — set at minimum:
+# 3. Edit .env — set at minimum:
 #    SIEM_IP, ELASTIC_PASSWORD, KIBANA_PASSWORD, KIBANA_ENCRYPTION_KEY
 nano .env
 
-# 5. (Optional) Run preflight checks
+# 4. (Optional) Run preflight checks
 ./elastic-container.sh preflight
 
-# 6. Start the stack
+# 5. Start the stack
 ./elastic-container.sh start
 
-# 7. Verify
+# 6. Verify
 ./elastic-container.sh status
 curl -sk https://127.0.0.1:8220/api/status
 ```

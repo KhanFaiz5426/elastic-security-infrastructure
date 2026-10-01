@@ -10,9 +10,25 @@ declare MacOSDR
 
 declare COMPOSE
 
-# Ignore following warning
-# shellcheck disable=SC1091
-. .env
+# Resolve the script's own directory so its library loads regardless of CWD.
+# (.env, docker-compose.yml and certificates stay CWD-relative: run this
+# script from the repository root.)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Host distribution detection (read-only; never used to install packages).
+# shellcheck source=lib/host-distro.sh
+. "${SCRIPT_DIR}/lib/host-distro.sh"
+
+# .env is optional at load time: without it, help/preflight still run and
+# preflight reports a friendly [FAIL] instead of aborting on a missing file.
+# Bare placeholder values (KEY=<PLACEHOLDER>, as shipped in .env.example) are
+# quoted on the fly so an unedited copy sources cleanly and preflight can
+# report the placeholders politely instead of dying on redirection syntax.
+if [ -f .env ]; then
+  # Ignore following warnings
+  # shellcheck disable=SC1090,SC1091
+  . <(sed -E 's/^([A-Za-z_][A-Za-z0-9_]*)=<([^<>[:space:]]*)>$/\1="<\2>"/' .env)
+fi
 
 # The stack superuser is "elastic"; allow an explicit override but never leave
 # this unbound (unset -u would abort the script before any Fleet API call).
@@ -23,7 +39,7 @@ ZEEK_ENABLED="${ZEEK_ENABLED:-0}"
 ZEEK_LOG_DIR="${ZEEK_LOG_DIR:-/opt/zeek/logs/current}"
 
 HEADERS=(
-  -H "kbn-version: ${STACK_VERSION}"
+  -H "kbn-version: ${STACK_VERSION:-}"
   -H "kbn-xsrf: kibana"
   -H 'Content-Type: application/json'
 )
@@ -40,11 +56,16 @@ CA_CERT=".certs/ca.crt"
 init_netrc() {
   NETRC_FILE=$(mktemp "${TMPDIR:-/tmp}/elastic-container-netrc.XXXXXX")
   chmod 600 "${NETRC_FILE}"
-  printf 'default login %s password %s\n' "${ELASTIC_USERNAME}" "${ELASTIC_PASSWORD}" > "${NETRC_FILE}"
+  printf 'default login %s password %s\n' "${ELASTIC_USERNAME}" "${ELASTIC_PASSWORD:-}" > "${NETRC_FILE}"
 }
 
 cleanup_netrc() {
-  [ -n "${NETRC_FILE}" ] && rm -f "${NETRC_FILE}"
+  if [ -n "${NETRC_FILE}" ]; then
+    rm -f "${NETRC_FILE}"
+  fi
+  # Always succeed: a non-zero status here would run under `set -e` inside the
+  # EXIT trap and clobber the script's real exit status (e.g. gate `exit 2`).
+  return 0
 }
 trap cleanup_netrc EXIT
 
@@ -197,35 +218,59 @@ check_required_apps() {
 # Returns 0 if all checks pass, 1 if any check fails.
 preflight() {
   local rc=0
-  local pass="[✓]"
-  local fail="[✗]"
+  local pass="[OK]"
+  local fail="[FAIL]"
+  local warn="[WARN]"
+  local docker_ok=0
+  local daemon_ok=0
+  local env_present=1
 
-  # --- Tool checks ---
-  if command -v docker &>/dev/null; then
-    echo "${pass} Docker"
-  else
-    echo "${fail} Docker not installed"
-    rc=1
-  fi
+  echo "Preflight checks (read-only — nothing is installed or changed)."
+  echo
 
-  if docker compose version &>/dev/null; then
-    echo "${pass} Docker Compose (v2)"
-  else
-    echo "${fail} Docker Compose v2 not available"
-    docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
-    echo "       Docker version: ${docker_version}"
-    if command -v docker-compose &>/dev/null; then
-      legacy_version=$(docker-compose version --short 2>/dev/null || echo "unknown")
-      echo "       Legacy docker-compose (v1) found: ${legacy_version}"
-      echo "       Legacy v1 is NOT supported — this project requires Compose v2 (depends_on conditions)"
-    else
-      echo "       Legacy docker-compose (v1): not installed"
+  # --- Host operating system (informational; never used to install packages) ---
+  host_detect_distro
+  if [ "${HOST_OS_PRESENT}" -eq 1 ]; then
+    echo "${pass} Distribution: $(host_distro_summary)"
+    if [ "${HOST_OS_PKG_MGR}" != "unknown" ]; then
+      echo "${pass} Package manager (informational): ${HOST_OS_PKG_MGR}"
     fi
-    echo "       Verify with: docker compose version"
-    echo "       See Deployment Guide Phase 0 (Step 0.6) for installation"
+  else
+    echo "${warn} Distribution: could not read ${OS_RELEASE_FILE:-/etc/os-release}"
+  fi
+
+  # --- Docker Engine (never installed automatically by this project) ---
+  if command -v docker >/dev/null 2>&1; then
+    docker_ok=1
+    if docker info >/dev/null 2>&1; then
+      daemon_ok=1
+      echo "${pass} Docker Engine ($(docker --version 2>/dev/null | head -n 1))"
+    else
+      echo "${fail} Docker Engine is installed but the daemon is not reachable (docker info failed)."
+      echo "     Start it with: sudo systemctl start docker   (or: sudo service docker start)"
+      echo "     If you see a 'permission denied' error, add your user to the docker group:"
+      echo "       sudo usermod -aG docker \"\$USER\"  — then log out and back in."
+      echo "     Then rerun: ./elastic-container.sh preflight"
+      rc=1
+    fi
+  else
+    echo "${fail} Docker Engine is not installed."
+    print_docker_install_hint
     rc=1
   fi
 
+  # --- Docker Compose v2 (the 'docker compose' plugin; legacy v1 rejected) ---
+  if [ "${docker_ok}" -eq 1 ]; then
+    if docker compose version >/dev/null 2>&1; then
+      echo "${pass} Docker Compose v2 ($(docker compose version 2>/dev/null | head -n 1))"
+    else
+      echo "${fail} Docker Compose v2 plugin is not available."
+      print_compose_install_hint
+      rc=1
+    fi
+  fi
+
+  # --- Required command-line tools ---
   for tool in curl jq openssl; do
     if command -v "${tool}" &>/dev/null; then
       echo "${pass} ${tool}"
@@ -235,92 +280,99 @@ preflight() {
     fi
   done
 
-  # --- .env checks ---
+  # --- .env checks (the remaining checks need .env values) ---
   if [ -f .env ]; then
     echo "${pass} .env"
   else
     echo "${fail} .env file not found (copy .env.example to .env)"
-    rc=1
-    return ${rc}
-  fi
-
-  # Required variables (check presence without printing values)
-  local required_vars=(SIEM_IP ELASTIC_PASSWORD KIBANA_PASSWORD STACK_VERSION KIBANA_ENCRYPTION_KEY ES_PORT KIBANA_PORT FLEET_PORT MEM_LIMIT)
-  local missing_vars=0
-  for var in "${required_vars[@]}"; do
-    val="${!var:-}"
-    if [ -z "${val}" ] || [[ "${val}" == "<"*">" ]]; then
-      echo "${fail} Required variable ${var} is empty or still a placeholder"
-      missing_vars=1
-      rc=1
-    fi
-  done
-  if [ "${missing_vars}" -eq 0 ]; then
-    echo "${pass} Required variables"
-  fi
-
-  # Password strength (without printing the passwords)
-  local pw_ok=1
-  for pw_var in ELASTIC_PASSWORD KIBANA_PASSWORD; do
-    pw_val="${!pw_var:-}"
-    if [ -n "${pw_val}" ] && [ "${#pw_val}" -lt 12 ]; then
-      echo "${fail} ${pw_var} must be at least 12 characters"
-      pw_ok=0
-      rc=1
-    fi
-    if [ "${pw_val}" = "changeme" ] || [ "${pw_val}" = "password" ]; then
-      echo "${fail} ${pw_var} is a well-known default"
-      pw_ok=0
-      rc=1
-    fi
-  done
-  if [ "${pw_ok}" -eq 1 ] && [ "${missing_vars}" -eq 0 ]; then
-    echo "${pass} Password policy"
-  fi
-
-  # SIEM_IP syntax check
-  if [[ "${SIEM_IP:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "${pass} SIEM_IP (${SIEM_IP})"
-  elif [ -n "${SIEM_IP:-}" ]; then
-    echo "${fail} SIEM_IP '${SIEM_IP}' does not look like a valid IPv4 address"
+    env_present=0
     rc=1
   fi
 
-  # Network interface check (only if SIEM_IFACE is set to a real value)
-  if [ -n "${SIEM_IFACE:-}" ] && [[ "${SIEM_IFACE}" != "<"*">" ]]; then
-    if ip link show "${SIEM_IFACE}" &>/dev/null 2>&1; then
-      echo "${pass} Network interface (${SIEM_IFACE})"
-    else
-      echo "${fail} Network interface '${SIEM_IFACE}' not found"
-      rc=1
-    fi
-  else
-    echo "${pass} Network interface (not configured, skipped)"
-  fi
-
-  # Port availability checks
-  local ports_ok=1
-  for port_var in ES_PORT KIBANA_PORT FLEET_PORT; do
-    port_val="${!port_var:-}"
-    if [ -n "${port_val}" ]; then
-      # Check if something other than our own containers is using the port
-      if ss -tlnp 2>/dev/null | grep -q ":${port_val} " && ! docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port_val}->"; then
-        echo "${fail} Port ${port_val} (${port_var}) is already in use"
-        ports_ok=0
+  if [ "${env_present}" -eq 1 ]; then
+    # Required variables (check presence without printing values)
+    local required_vars=(SIEM_IP ELASTIC_PASSWORD KIBANA_PASSWORD STACK_VERSION KIBANA_ENCRYPTION_KEY ES_PORT KIBANA_PORT FLEET_PORT MEM_LIMIT)
+    local missing_vars=0
+    for var in "${required_vars[@]}"; do
+      val="${!var:-}"
+      if [ -z "${val}" ] || [[ "${val}" == "<"*">" ]]; then
+        echo "${fail} Required variable ${var} is empty or still a placeholder"
+        missing_vars=1
         rc=1
       fi
+    done
+    if [ "${missing_vars}" -eq 0 ]; then
+      echo "${pass} Required variables"
     fi
-  done
-  if [ "${ports_ok}" -eq 1 ]; then
-    echo "${pass} Ports (${ES_PORT}, ${KIBANA_PORT}, ${FLEET_PORT})"
-  fi
 
-  # Strict validation of interpolated config values
-  if validate_config >/dev/null 2>&1; then
-    echo "${pass} Config value validation"
-  else
-    echo "${fail} Config value validation (run start for details)"
-    rc=1
+    # Password strength (without printing the passwords)
+    local pw_ok=1
+    for pw_var in ELASTIC_PASSWORD KIBANA_PASSWORD; do
+      pw_val="${!pw_var:-}"
+      if [ -n "${pw_val}" ] && [ "${#pw_val}" -lt 12 ]; then
+        echo "${fail} ${pw_var} must be at least 12 characters"
+        pw_ok=0
+        rc=1
+      fi
+      if [ "${pw_val}" = "changeme" ] || [ "${pw_val}" = "password" ]; then
+        echo "${fail} ${pw_var} is a well-known default"
+        pw_ok=0
+        rc=1
+      fi
+    done
+    if [ "${pw_ok}" -eq 1 ] && [ "${missing_vars}" -eq 0 ]; then
+      echo "${pass} Password policy"
+    fi
+
+    # SIEM_IP syntax check
+    if [[ "${SIEM_IP:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "${pass} SIEM_IP (${SIEM_IP})"
+    elif [ -n "${SIEM_IP:-}" ]; then
+      echo "${fail} SIEM_IP '${SIEM_IP}' does not look like a valid IPv4 address"
+      rc=1
+    fi
+
+    # Network interface check (only if SIEM_IFACE is set to a real value)
+    if [ -n "${SIEM_IFACE:-}" ] && [[ "${SIEM_IFACE}" != "<"*">" ]]; then
+      if ip link show "${SIEM_IFACE}" &>/dev/null 2>&1; then
+        echo "${pass} Network interface (${SIEM_IFACE})"
+      else
+        echo "${fail} Network interface '${SIEM_IFACE}' not found"
+        rc=1
+      fi
+    else
+      echo "${pass} Network interface (not configured, skipped)"
+    fi
+
+    # Port availability checks (ownership by our own containers can only be
+    # verified while the Docker daemon is reachable)
+    if [ "${daemon_ok}" -eq 1 ]; then
+      local ports_ok=1
+      for port_var in ES_PORT KIBANA_PORT FLEET_PORT; do
+        port_val="${!port_var:-}"
+        if [ -n "${port_val}" ]; then
+          # Check if something other than our own containers is using the port
+          if ss -tlnp 2>/dev/null | grep -q ":${port_val} " && ! docker ps --format '{{.Ports}}' 2>/dev/null | grep -q ":${port_val}->"; then
+            echo "${fail} Port ${port_val} (${port_var}) is already in use"
+            ports_ok=0
+            rc=1
+          fi
+        fi
+      done
+      if [ "${ports_ok}" -eq 1 ]; then
+        echo "${pass} Ports (${ES_PORT:-?}, ${KIBANA_PORT:-?}, ${FLEET_PORT:-?})"
+      fi
+    else
+      echo "${warn} Ports: skipped (Docker daemon unreachable — cannot verify container port ownership)"
+    fi
+
+    # Strict validation of interpolated config values
+    if validate_config >/dev/null 2>&1; then
+      echo "${pass} Config value validation"
+    else
+      echo "${fail} Config value validation (run start for details)"
+      rc=1
+    fi
   fi
 
   # Disk space check (minimum 20GB recommended)
@@ -331,7 +383,7 @@ preflight() {
     if [ "${avail_kb}" -ge 20971520 ]; then
       echo "${pass} Disk space (${avail_gb}GB available)"
     else
-      echo "[⚠] Disk space: ${avail_gb}GB available, 20GB+ recommended"
+      echo "${warn} Disk space: ${avail_gb}GB available, 20GB+ recommended"
     fi
   else
     echo "${pass} Disk space (could not determine, skipped)"
@@ -361,6 +413,37 @@ preflight() {
   return ${rc}
 }
 
+# Hint printed when Docker Engine is missing. This project NEVER installs
+# Docker — the operator installs it using their distribution's own method.
+print_docker_install_hint() {
+  host_detect_distro
+  echo "     This project does not automatically install Docker."
+  echo "     Install Docker Engine for your Linux distribution first."
+  if [ "${HOST_OS_PRESENT}" -eq 1 ]; then
+    echo "     Detected distribution: ${HOST_OS_PRETTY} (ID=${HOST_OS_ID})."
+    if [ -n "${HOST_OS_SECTION}" ]; then
+      echo "     See: README.md -> Host Prerequisites -> Docker on ${HOST_OS_SECTION}."
+    else
+      echo "     See: README.md -> Host Prerequisites -> Docker Installation."
+    fi
+  else
+    echo "     See: README.md -> Host Prerequisites -> Docker Installation."
+  fi
+  echo "     Then rerun: ./elastic-container.sh preflight"
+}
+
+# Hint printed when 'docker compose' (Compose v2 plugin) is unavailable.
+print_compose_install_hint() {
+  echo "     Expected: docker compose version"
+  if command -v docker-compose >/dev/null 2>&1; then
+    echo "     A legacy 'docker-compose' (v1) binary was found, but this project"
+    echo "     requires the Compose v2 form: 'docker compose'."
+  fi
+  echo "     Install the Compose v2 plugin for your distribution"
+  echo "     (e.g. the 'docker-compose-plugin' package, or 'docker-compose' on"
+  echo "     Debian/Kali/Arch), then rerun: ./elastic-container.sh preflight"
+}
+
 # Create the script usage menu
 usage() {
   cat <<EOF | sed -e 's/^  //'
@@ -379,12 +462,22 @@ usage() {
   flags:
     -v              enable verbose output
     -u              same as update-version (refreshes STACK_VERSION in .env), then exit
+  prerequisites:
+    Docker Engine + Docker Compose v2 ('docker compose version' must work).
+    This project never installs Docker for you - see README.md 'Prerequisites'
+    for per-distribution install instructions (Ubuntu, Debian, Kali, Fedora,
+    RHEL, Rocky, AlmaLinux, Arch, macOS), then run the preflight action.
 EOF
 }
 
 # Set STACK_VERSION in .env to the highest stable semver tag listed for elastic/elasticsearch on Docker Hub.
 refresh_stack_version() {
   check_required_apps
+
+  if [ ! -f .env ]; then
+    echo "No .env file found in the current directory. Create one first: cp .env.example .env" >&2
+    exit 1
+  fi
 
   local hub_repo="https://hub.docker.com/v2/repositories/elastic/elasticsearch/tags"
   local page=1
@@ -918,30 +1011,36 @@ fi
 
 ACTION="${*:-help}"
 
-if docker compose version &>/dev/null; then
+# Detect Docker Compose v2. The legacy `docker-compose` (v1) binary is
+# intentionally NOT accepted: this project requires `docker compose`.
+COMPOSE=""
+if docker compose version >/dev/null 2>&1; then
   COMPOSE="docker compose"
-else
-  case "${ACTION}" in
-  help | "update-version" | "preflight") ;;
-  *)
-    docker_version=$(docker version --format '{{.Server.Version}}' 2>/dev/null || echo "unknown")
-    echo "ERROR: Docker Compose v2 (docker compose) is required but not available."
-    echo "Docker version: ${docker_version}"
-    if command -v docker-compose &>/dev/null; then
-      legacy_version=$(docker-compose version --short 2>/dev/null || echo "unknown")
-      echo "Legacy docker-compose (v1) detected: ${legacy_version}"
-      echo "Legacy v1 is NOT supported — this project uses depends_on conditions (Compose v2+)."
-    else
-      echo "Legacy docker-compose (v1): not installed"
-    fi
-    echo ""
-    echo "To verify: docker compose version"
-    echo "To retry:  ./elastic-container.sh start"
-    echo "Install:   See Deployment Guide Phase 0 (Step 0.6) for OS-specific instructions"
-    exit 2
-    ;;
-  esac
 fi
+
+# Friendly, actionable errors for missing host prerequisites. Docker is never
+# installed automatically by this project — the operator installs it for
+# their own distribution (README.md -> Host Prerequisites).
+case "${ACTION}" in
+help | "update-version" | "preflight" | "start")
+  # help/update-version need no Docker; preflight and start report the full
+  # prerequisite checklist themselves (with per-check [FAIL] guidance).
+  ;;
+*)
+  if ! command -v docker >/dev/null 2>&1; then
+    echo "ERROR: Docker Engine is not installed."
+    echo
+    print_docker_install_hint
+    exit 2
+  fi
+  if [ -z "${COMPOSE}" ]; then
+    echo "ERROR: Docker Compose v2 is not available ('docker compose' failed)."
+    echo
+    print_compose_install_hint
+    exit 2
+  fi
+  ;;
+esac
 
 # Prepare the ephemeral netrc used for authenticated API calls (no credentials
 # in argv). Set up before any action that talks to Kibana/Elasticsearch.
