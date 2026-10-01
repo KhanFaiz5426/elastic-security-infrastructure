@@ -50,7 +50,19 @@ t_assert "script sources the distro-detection library" \
 t_assert "gate gives an explicit Compose v2 expectation" \
   grep -q "Expected: docker compose version" "${ec}"
 
-# --- 3. README documents every distribution + the Kali warning --------------
+# --- 3. Preflight must diagnose failures instead of guessing ----------------
+t_assert "script shows the real 'docker info' error line" \
+  grep -q "docker info says:" "${ec}"
+t_assert "script detects stale docker-group sessions" \
+  grep -q "IS listed in the docker group" "${ec}"
+t_assert "script offers the sg docker workaround" \
+  grep -q "sg docker -c" "${ec}"
+t_assert "script prints a distro-aware tool install hint" \
+  grep -q "print_tool_install_hint" "${ec}"
+t_assert "apt tool hint present" \
+  grep -qF 'Install: sudo apt install -y ${tools}' "${ec}"
+
+# --- 4. README documents every distribution + the Kali warning --------------
 readme="${REPO}/README.md"
 for heading in "### Ubuntu" "### Debian" "### Kali" "### Fedora" "### RHEL" \
   "### Rocky" "### AlmaLinux" "### Arch" "### macOS"; do
@@ -66,8 +78,10 @@ t_assert "README documents the Compose v2 verification" \
   grep -q "docker compose version" "${readme}"
 t_assert "README no longer uses the old newgrp one-liner" \
   bash -c '! grep -q "newgrp" "$0"' "${readme}"
+t_assert "README documents how to install the host tools" \
+  grep -q "apt install -y jq" "${readme}"
 
-# --- 4. Deployment guide Phase 0 = host prerequisites ------------------------
+# --- 5. Deployment guide Phase 0 = host prerequisites ------------------------
 guide="${REPO}/ELASTIC-SECURITY-DEPLOYMENT-GUIDE.md"
 t_assert "guide Phase 0 heading renamed to Host Prerequisites" \
   grep -q "# PHASE 0 — HOST PREREQUISITES" "${guide}"
@@ -80,5 +94,9 @@ t_assert "guide warns about the Ubuntu repo on Kali" \
 t_assert "guide verifies Compose v2" grep -q "docker compose version" "${guide}"
 t_assert "guide has per-distro Docker sections" \
   grep -q "### Docker on Kali Linux" "${guide}"
+t_assert "guide documents how to install the host tools" \
+  grep -q "apt install -y jq" "${guide}"
+t_assert "guide explains the stale docker-group session" \
+  grep -q "sg docker -c" "${guide}"
 
 t_done

@@ -311,22 +311,33 @@ Open Docker Desktop once and complete its setup; grant privileged access when pr
 
 For every distribution: **log out and back in** after `usermod` so the `docker` group membership takes effect.
 
-## Step 0.3: Verify Docker Engine and Compose v2
+## Step 0.3: Verify Docker Engine, Compose v2, and host tools
 
 ```bash
 docker version
 docker compose version
+jq --version
+curl --version | head -n 1
+openssl version
 ```
 
-> **What it does:** confirms the Docker client, the daemon, and the Compose v2 plugin are all usable.
+> **What it does:** confirms the Docker client, the daemon, the Compose v2 plugin, and the command-line tools used by the script are all usable.
 
-> **Success:** `docker version` prints both a `Client` and a `Server` section; `docker compose version` prints `Docker Compose version v2.x.x`.
+> **Success:** `docker version` prints both a `Client` and a `Server` section; `docker compose version` prints `Docker Compose version v2.x.x`; each tool command prints a version string.
 
-> **If it fails:**
+> **If Docker fails:**
 > - `docker: command not found` → Docker is not installed — redo Step 0.2 for **your** distribution.
-> - `permission denied ... docker.sock` → `sudo usermod -aG docker "$USER"`, then log out and back in.
+> - `permission denied ... docker.sock` → if you already ran `sudo usermod -aG docker "$USER"`: **log out and log back in first** — group changes never apply to sessions that are already running. To try it without logging out: `sg docker -c "./elastic-container.sh preflight"`. If you have never added yourself to the group, run the `usermod` command first.
 > - `compose` is not a docker command / `docker-compose: command not found` → the Compose **v2 plugin** is missing. Install it for your distribution (e.g. `docker-compose-plugin` from Docker's apt/dnf repository, or the `docker-compose` package on Debian/Kali/Arch). The legacy `docker-compose` (v1) binary alone is **not** supported.
 > - daemon not running → `sudo systemctl enable --now docker`
+
+> **If a tool is missing** (`jq`, `curl`, or `openssl` reports `command not found`):
+> - Debian / Ubuntu / Kali: `sudo apt install -y jq curl openssl git`
+> - Fedora / RHEL / Rocky / AlmaLinux: `sudo dnf install -y jq curl openssl git`
+> - Arch Linux: `sudo pacman -S jq curl openssl git`
+> - macOS: `brew install jq curl openssl git`
+
+`./elastic-container.sh preflight` prints all of these as `[OK]` / `[FAIL]` / `[WARN]` lines together with the exact fix command for *your* distribution — run it whenever a check fails.
 
 ## Step 0.4: Verify you are in the correct repository
 

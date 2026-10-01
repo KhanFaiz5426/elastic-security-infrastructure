@@ -188,6 +188,19 @@ Compose v2 plugin using your own distribution's method first, then verify.
 - 4 GB RAM and 20 GB free disk (recommended)
 - Linux or macOS
 
+Install the host tools with your package manager:
+
+```bash
+# Debian / Ubuntu / Kali
+sudo apt install -y jq curl openssl git
+# Fedora / RHEL / Rocky / AlmaLinux
+sudo dnf install -y jq curl openssl git
+# Arch Linux
+sudo pacman -S jq curl openssl git
+# macOS (Homebrew)
+brew install jq curl openssl git
+```
+
 > [!WARNING]
 > **Kali Linux (and other Debian derivatives):** never add Docker's *Ubuntu*
 > repository (`https://download.docker.com/linux/ubuntu`) on Kali. Its suite

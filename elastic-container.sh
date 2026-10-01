@@ -202,16 +202,21 @@ validate_config() {
 }
 
 check_required_apps() {
-    apps=("jq" "curl")
+    local app
+    local missing=()
 
-    for app in "${apps[@]}"; do
-        if ! command -v "$app" &>/dev/null; then
-            echo "The application '$app' is not installed."
-            exit 1
+    for app in jq curl; do
+        if ! command -v "${app}" &>/dev/null; then
+            missing+=("${app}")
         fi
     done
 
-    echo "All required applications are installed."
+    if [ "${#missing[@]}" -gt 0 ]; then
+        echo "Missing required tool(s): ${missing[*]}"
+        print_tool_install_hint "${missing[*]}"
+        echo "Install them, then rerun the action."
+        exit 1
+    fi
 }
 
 # Run a read-only preflight check of all deployment prerequisites.
@@ -246,10 +251,38 @@ preflight() {
       daemon_ok=1
       echo "${pass} Docker Engine ($(docker --version 2>/dev/null | head -n 1))"
     else
+      local docker_raw docker_err cur_user grp_members
+      docker_raw="$(docker info 2>&1 || true)"
+      docker_err="$(printf '%s\n' "${docker_raw}" |
+        grep -m1 -E 'permission denied|Cannot connect|error during connect|Is the docker|failed to connect' || true)"
       echo "${fail} Docker Engine is installed but the daemon is not reachable (docker info failed)."
-      echo "     Start it with: sudo systemctl start docker   (or: sudo service docker start)"
-      echo "     If you see a 'permission denied' error, add your user to the docker group:"
-      echo "       sudo usermod -aG docker \"\$USER\"  — then log out and back in."
+      [ -z "${docker_err}" ] || echo "     docker info says: ${docker_err}"
+      case "${docker_raw}" in
+      *permission\ denied*)
+        echo "     Cause: the Docker daemon is running but rejected this user (permission denied)."
+        cur_user="${USER:-$(id -un 2>/dev/null || true)}"
+        grp_members="$(sed -n 's/^docker:[^:]*:[^:]*:\(.*\)$/\1/p' "${GROUP_FILE:-/etc/group}" 2>/dev/null || true)"
+        if [ -n "${cur_user}" ] && [ -n "${grp_members}" ]; then
+          case ",${grp_members}," in
+          *",${cur_user},"*)
+            echo "     Your user IS listed in the docker group, but this shell started before the"
+            echo "     membership was added. Log out and log back in — or run it in this session:"
+            echo "       sg docker -c './elastic-container.sh preflight'"
+            ;;
+          *)
+            echo "     Fix: sudo usermod -aG docker \"\$USER\"  — then log out and back in."
+            ;;
+          esac
+        else
+          echo "     Fix: sudo usermod -aG docker \"\$USER\"  — then log out and back in."
+        fi
+        ;;
+      *)
+        echo "     Cause: the Docker daemon is not running."
+        echo "     Start it with: sudo systemctl start docker   (or: sudo service docker start)"
+        echo "     Enable at boot: sudo systemctl enable docker"
+        ;;
+      esac
       echo "     Then rerun: ./elastic-container.sh preflight"
       rc=1
     fi
@@ -271,14 +304,21 @@ preflight() {
   fi
 
   # --- Required command-line tools ---
+  local tool
+  local missing_tools=()
   for tool in curl jq openssl; do
     if command -v "${tool}" &>/dev/null; then
       echo "${pass} ${tool}"
     else
       echo "${fail} ${tool} not installed"
+      missing_tools+=("${tool}")
       rc=1
     fi
   done
+  if [ "${#missing_tools[@]}" -gt 0 ]; then
+    print_tool_install_hint "${missing_tools[*]}"
+    echo "     Then rerun: ./elastic-container.sh preflight"
+  fi
 
   # --- .env checks (the remaining checks need .env values) ---
   if [ -f .env ]; then
@@ -442,6 +482,22 @@ print_compose_install_hint() {
   echo "     Install the Compose v2 plugin for your distribution"
   echo "     (e.g. the 'docker-compose-plugin' package, or 'docker-compose' on"
   echo "     Debian/Kali/Arch), then rerun: ./elastic-container.sh preflight"
+}
+
+# Print the exact command to install missing host tools (jq, curl, ...) for the
+# detected package manager. HINT ONLY — this project never runs it: preflight
+# stays read-only and the operator stays in control of package installation.
+print_tool_install_hint() {
+  local tools="$1"
+  host_detect_distro
+  case "${HOST_OS_PKG_MGR}" in
+  apt) echo "     Install: sudo apt install -y ${tools}" ;;
+  dnf) echo "     Install: sudo dnf install -y ${tools}" ;;
+  pacman) echo "     Install: sudo pacman -S ${tools}" ;;
+  zypper) echo "     Install: sudo zypper install -y ${tools}" ;;
+  brew) echo "     Install: brew install ${tools}" ;;
+  *) echo "     Install '${tools}' with your distribution's package manager." ;;
+  esac
 }
 
 # Create the script usage menu
