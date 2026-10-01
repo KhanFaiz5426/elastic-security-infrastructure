@@ -21,6 +21,7 @@ DEPLOY_SCRIPTS=(
   "${REPO}/fleet-entrypoint.sh"
   "${REPO}/set-static-ip.sh"
   "${REPO}/lib/host-distro.sh"
+  "${REPO}/lib/rule-reconcile.sh"
 )
 
 # --- 1. Deployment scripts must never install Docker or configure its repos ---

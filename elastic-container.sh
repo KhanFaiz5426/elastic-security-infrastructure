@@ -19,6 +19,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/host-distro.sh
 . "${SCRIPT_DIR}/lib/host-distro.sh"
 
+# Detection-rule reconciliation plan (pure computation, read-only).
+# shellcheck source=lib/rule-reconcile.sh
+. "${SCRIPT_DIR}/lib/rule-reconcile.sh"
+
 # .env is optional at load time: without it, help/preflight still run and
 # preflight reports a friendly [FAIL] instead of aborting on a missing file.
 # Bare placeholder values (KEY=<PLACEHOLDER>, as shipped in .env.example) are
@@ -52,6 +56,9 @@ HEADERS=(
 # deployment-automation call.
 NETRC_FILE=""
 CA_CERT=".certs/ca.crt"
+# Scratch directory used by reconcile_detection_rules (rule inventory + plan);
+# created on demand and removed by the EXIT trap even on failure.
+RECONCILE_TMP=""
 
 init_netrc() {
   NETRC_FILE=$(mktemp "${TMPDIR:-/tmp}/elastic-container-netrc.XXXXXX")
@@ -62,6 +69,9 @@ init_netrc() {
 cleanup_netrc() {
   if [ -n "${NETRC_FILE}" ]; then
     rm -f "${NETRC_FILE}"
+  fi
+  if [ -n "${RECONCILE_TMP}" ]; then
+    rm -rf "${RECONCILE_TMP}"
   fi
   # Always succeed: a non-zero status here would run under `set -e` inside the
   # EXIT trap and clobber the script's real exit status (e.g. gate `exit 2`).
@@ -589,6 +599,109 @@ refresh_stack_version() {
   echo "Images pull from docker.elastic.co; tags match Docker Hub elastic/elasticsearch releases."
 }
 
+# Reconcile the enabled/disabled state of installed detection rules with the
+# OS flags in .env (WindowsDR / LinuxDR / MacOSDR). Runs on every start.
+#
+# Read-only inventory, minimal writes:
+#   1. Fetch the full rule inventory (GET .../rules/_find, paginated).
+#   2. Compute the desired state locally (lib/rule-reconcile.sh):
+#        - exact OS-tag membership only (same tag sets the script always used)
+#        - multi-OS rule stays enabled while ANY of its OS flags is 1
+#        - rules outside the managed OS scope — including rules with no OS
+#          tag, such as package-default rules — are never touched
+#   3. Apply ONLY the differences via ids-scoped _bulk_action calls, so a
+#      configuration that already matches produces zero writes (idempotent
+#      re-runs do not bump rule updated_at).
+#
+# Prebuilt rule *installation* happens separately in configure_kbn()
+# (PUT .../rules/prepackaged) and is not affected by this function.
+reconcile_detection_rules() {
+  local win_flag=0
+  local lin_flag=0
+  local mac_flag=0
+  if [ "${WindowsDR:-0}" = "1" ]; then win_flag=1; fi
+  if [ "${LinuxDR:-0}" = "1" ]; then lin_flag=1; fi
+  if [ "${MacOSDR:-0}" = "1" ]; then mac_flag=1; fi
+
+  echo "Reconciling detection rules with OS flags (WindowsDR=${win_flag} LinuxDR=${lin_flag} MacOSDR=${mac_flag})."
+
+  RECONCILE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/elastic-container-reconcile.XXXXXX")
+  local rules_ndjson="${RECONCILE_TMP}/rules.ndjson"
+  local plan_json="${RECONCILE_TMP}/plan.json"
+  : > "${rules_ndjson}"
+
+  # --- 1. Inventory (read-only, paginated) ---------------------------------
+  local page=1
+  local per_page=10000
+  local resp page_rules total
+  while :; do
+    if ! resp=$(api_curl -f "${HEADERS[@]}" \
+        "${LOCAL_KBN_URL}/api/detection_engine/rules/_find?page=${page}&per_page=${per_page}"); then
+      echo "ERROR: failed to fetch the detection-rule inventory (page ${page})." >&2
+      exit 1
+    fi
+    if ! printf '%s' "${resp}" | jq -e '(.data | type == "array") and (.total | type == "number")' > /dev/null; then
+      echo "ERROR: unexpected response from the detection-rules _find API." >&2
+      exit 1
+    fi
+    printf '%s' "${resp}" | jq -c '.data[]' >> "${rules_ndjson}"
+    page_rules=$(printf '%s' "${resp}" | jq -r '.data | length')
+    total=$(printf '%s' "${resp}" | jq -r '.total')
+    if [ "${page_rules}" -eq 0 ] || [ $((page * per_page)) -ge "${total}" ]; then
+      break
+    fi
+    page=$((page + 1))
+  done
+
+  # --- 2. Plan (pure computation; exact OS-tag membership) -----------------
+  if ! rule_reconcile_plan "${rules_ndjson}" "${win_flag}" "${lin_flag}" "${mac_flag}" > "${plan_json}"; then
+    echo "ERROR: could not compute the detection-rule reconcile plan." >&2
+    exit 1
+  fi
+
+  local n_total n_managed n_enable n_disable
+  n_total=$(jq -r '.total' "${plan_json}")
+  n_managed=$(jq -r '.managed' "${plan_json}")
+  n_enable=$(jq -r '.enable | length' "${plan_json}")
+  n_disable=$(jq -r '.disable | length' "${plan_json}")
+  echo "Scanned ${n_total} installed rules (${n_managed} in the OS-managed scope)."
+
+  # --- 3. Apply only the differences ---------------------------------------
+  local ids body bulk
+  if [ "${n_enable}" -gt 0 ]; then
+    ids=$(jq -c '.enable' "${plan_json}")
+    body=$(rule_bulk_action_body enable "${ids}")
+    if ! bulk=$(api_curl -f "${HEADERS[@]}" -X POST \
+        "${LOCAL_KBN_URL}/api/detection_engine/rules/_bulk_action" -d "${body}"); then
+      echo "ERROR: failed to enable ${n_enable} detection rule(s)." >&2
+      exit 1
+    fi
+    printf '%s' "${bulk}" | jq -e '.success == true' > /dev/null \
+      || { echo "ERROR: failed to enable ${n_enable} detection rule(s)." >&2; exit 1; }
+    echo "Enabled ${n_enable} rule(s) (OS flag = 1)."
+  fi
+
+  if [ "${n_disable}" -gt 0 ]; then
+    ids=$(jq -c '.disable' "${plan_json}")
+    body=$(rule_bulk_action_body disable "${ids}")
+    if ! bulk=$(api_curl -f "${HEADERS[@]}" -X POST \
+        "${LOCAL_KBN_URL}/api/detection_engine/rules/_bulk_action" -d "${body}"); then
+      echo "ERROR: failed to disable ${n_disable} detection rule(s)." >&2
+      exit 1
+    fi
+    printf '%s' "${bulk}" | jq -e '.success == true' > /dev/null \
+      || { echo "ERROR: failed to disable ${n_disable} detection rule(s)." >&2; exit 1; }
+    echo "Disabled ${n_disable} rule(s) (OS flag = 0 and no other enabled OS flag owns them)."
+  fi
+
+  if [ "${n_enable}" -eq 0 ] && [ "${n_disable}" -eq 0 ]; then
+    echo "Rule state already matches the OS flags - no changes (idempotent)."
+  fi
+
+  rm -rf "${RECONCILE_TMP}"
+  RECONCILE_TMP=""
+}
+
 # Create a function to enable the Detection Engine and load prebuilt rules in Kibana
 configure_kbn() {
   MAXTRIES=15
@@ -616,49 +729,12 @@ configure_kbn() {
       echo
       echo "Prepackaged rules installed!"
       echo
-      if [[ "${LinuxDR}" -eq 0 && "${WindowsDR}" -eq 0 && "${MacOSDR}" -eq 0 ]]; then
-        echo "No detection rules enabled in the .env file, skipping detection rules enablement."
-        echo
-        break
-      else
-        echo "Enabling detection rules"
-        if [ "${LinuxDR}" -eq 1 ]; then
-
-          bulk=$(api_curl -f "${HEADERS[@]}" -X POST "${LOCAL_KBN_URL}/api/detection_engine/rules/_bulk_action" -d'
-            {
-              "query": "alert.attributes.tags: (\"Linux\" OR \"OS: Linux\")",
-              "action": "enable"
-            }
-            ')
-          printf '%s' "${bulk}" | jq -e '.success == true' > /dev/null || { echo "ERROR: Failed to enable Linux detection rules."; exit 1; }
-          echo
-          echo "Successfully enabled Linux detection rules"
-        fi
-        if [ "${WindowsDR}" -eq 1 ]; then
-
-          bulk=$(api_curl -f "${HEADERS[@]}" -X POST "${LOCAL_KBN_URL}/api/detection_engine/rules/_bulk_action" -d'
-            {
-              "query": "alert.attributes.tags: (\"Windows\" OR \"OS: Windows\")",
-              "action": "enable"
-            }
-            ')
-          printf '%s' "${bulk}" | jq -e '.success == true' > /dev/null || { echo "ERROR: Failed to enable Windows detection rules."; exit 1; }
-          echo
-          echo "Successfully enabled Windows detection rules"
-        fi
-        if [ "${MacOSDR}" -eq 1 ]; then
-
-          bulk=$(api_curl -f "${HEADERS[@]}" -X POST "${LOCAL_KBN_URL}/api/detection_engine/rules/_bulk_action" -d'
-            {
-              "query": "alert.attributes.tags: (\"macOS\" OR \"OS: macOS\")",
-              "action": "enable"
-            }
-            ')
-          printf '%s' "${bulk}" | jq -e '.success == true' > /dev/null || { echo "ERROR: Failed to enable MacOS detection rules."; exit 1; }
-          echo
-          echo "Successfully enabled MacOS detection rules"
-        fi
-      fi
+      # Installation (above) and reconciliation (below) are separate steps: the
+      # rules' enabled/disabled state is reconciled with the OS flags on
+      # every start — flag 1 enables, flag 0 disables previously enabled
+      # OS-managed rules, and rules outside the OS-managed scope are left
+      # untouched (see reconcile_detection_rules).
+      reconcile_detection_rules
       echo
       break
     else

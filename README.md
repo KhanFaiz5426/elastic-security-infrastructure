@@ -31,7 +31,7 @@ The framework is designed for security practitioners, researchers, and lab/homel
 - **TLS/PKI automation** — CA and per-service certificate generation with parameterized SANs; certificate isolation per service
 - **Fleet policy orchestration** — idempotent creation of OS-specific agent policies (Windows, Linux, Baseline) with correct integrations pre-attached
 - **Elastic Defend EDR** — EDRComplete preset deployed on all endpoint policies with process, file, network, registry, and security-event telemetry
-- **Prebuilt detection rules** — bulk-enabled by OS (Windows, Linux, macOS) at first start via `.env` flags
+- **Prebuilt detection rules** — installed on start and reconciled per OS (Windows, Linux, macOS) from `.env` flags on every start
 - **Parameterized networking** — all addressing driven from `.env`; supports NAT/management IPs and static IP configuration
 - **Security hardening** — password policy enforcement, credential isolation, TLS verification, destructive-action confirmation, and action audit logging
 - **Preflight validation** — host distribution detection plus Docker Engine, daemon, Compose v2, tools, configuration, ports, disk, and memory checks before deployment (read-only; never installs anything)
@@ -144,13 +144,24 @@ When `ZEEK_ENABLED=1`, the start script creates a `Zeek` Fleet policy configured
 
 ## Detection
 
-The repository installs Elastic's prebuilt detection rules on start and can bulk-enable them per OS via `.env` flags:
+The repository installs Elastic's prebuilt detection rules on start and **reconciles** rule state with the `.env` OS flags on every start (not only the first):
 
 | Flag | Effect |
 |---|---|
-| `WindowsDR=1` | Enables rules tagged `Windows` or `OS: Windows` |
-| `LinuxDR=1` | Enables rules tagged `Linux` or `OS: Linux` |
-| `MacOSDR=1` | Enables rules tagged `macOS` or `OS: macOS` |
+| `WindowsDR=1` | Rules tagged `Windows` or `OS: Windows` are enabled |
+| `WindowsDR=0` | Those rules are disabled (if they are currently enabled) |
+| `LinuxDR=1` | Rules tagged `Linux` or `OS: Linux` are enabled |
+| `LinuxDR=0` | Those rules are disabled (if they are currently enabled) |
+| `MacOSDR=1` | Rules tagged `macOS` or `OS: macOS` are enabled |
+| `MacOSDR=0` | Those rules are disabled (if they are currently enabled) |
+
+Reconciliation details:
+
+- Exact OS-tag membership only (whole tags such as `Windows`/`OS: Windows` — substring tags are never matched).
+- A rule with several OS tags stays enabled while **any** of its owning flags is `1`; it is disabled only when none of them is `1`.
+- Rules with no OS tag — including the package-default `Endpoint Security (Elastic Defend)` — are never touched; package-defined state is preserved.
+- Only differences are applied (ids-scoped bulk enable/disable), so a configuration that already matches produces zero writes and repeated runs are idempotent.
+- Changing a flag to `0` and restarting the stack disables the previously enabled rules for that OS; changing it to `1` enables them again.
 
 Detection rules consume telemetry — they do not collect it. The pipeline is:
 
@@ -158,7 +169,7 @@ Detection rules consume telemetry — they do not collect it. The pipeline is:
 Integration (on agent policy) -> Agent collects data -> Data stream in Elasticsearch -> Detection rule queries data -> Alert
 ```
 
-Rules requiring specific host-side configuration (Sysmon, PowerShell Script Block Logging, Windows audit policy) remain dormant until the prerequisite telemetry is flowing. Enabling a rule without its corresponding telemetry pipeline means the rule will never fire.
+Rules requiring specific host-side configuration (Sysmon, PowerShell Script Block Logging, Windows audit policy) remain dormant until the prerequisite telemetry is flowing. Enabling a rule without its corresponding telemetry pipeline means the rule will never fire. Some enabled rules also query data streams that only exist when a matching integration is deployed — Kibana reports these as `Unable to find matching indices` warnings or execution failures; that is expected until the telemetry source is installed, and it is not a reason to disable the rule or drop OS coverage.
 
 ## Security Hardening
 
@@ -418,9 +429,9 @@ All configuration is driven by the `.env` file. No IPs or credentials are hardco
 | `KIBANA_PASSWORD` | **Yes** | — | Password for `KIBANA_USERNAME` (min 12 chars) |
 | `KIBANA_ENCRYPTION_KEY` | **Yes** | — | Random key for saved-object encryption; generate with `openssl rand -hex 32` |
 | `STACK_VERSION` | No | `9.5.0` | Elastic image tag (Elasticsearch + Kibana + Agent) |
-| `WindowsDR` | No | `1` | Enable Windows detection rules at first start |
-| `LinuxDR` | No | `0` | Enable Linux detection rules at first start |
-| `MacOSDR` | No | `0` | Enable macOS detection rules at first start |
+| `WindowsDR` | No | `1` | Enable (`1`) / disable (`0`) Windows detection rules; reconciled on every start |
+| `LinuxDR` | No | `0` | Enable (`1`) / disable (`0`) Linux detection rules; reconciled on every start |
+| `MacOSDR` | No | `0` | Enable (`1`) / disable (`0`) macOS detection rules; reconciled on every start |
 | `ZEEK_ENABLED` | No | `0` | Set to `1` to create Zeek Fleet policy + integration |
 | `ZEEK_LOG_DIR` | No | `/opt/zeek/logs/current` | Zeek JSON log directory on the sensor host |
 | `LICENSE` | No | `basic` | `basic` (free) or `trial` (30-day full features) |
@@ -495,7 +506,7 @@ Same flow as Linux — trust the CA in the system keychain, use the appropriate 
 | Fleet agent policy creation (Windows, Linux, Baseline) | First start |
 | Elastic Defend integration (EDRComplete) on all endpoint policies | First start |
 | Windows integration (Sysmon/PowerShell/Defender winlog channels) | First start, Windows Endpoint policy only |
-| Detection rule installation and bulk enablement | Per `WindowsDR`/`LinuxDR`/`MacOSDR` |
+| Detection rule installation and reconciliation (enable/disable per OS flag) | Per `WindowsDR`/`LinuxDR`/`MacOSDR` |
 | Zeek Fleet policy + integration | `ZEEK_ENABLED=1` |
 
 ### Operator-controlled

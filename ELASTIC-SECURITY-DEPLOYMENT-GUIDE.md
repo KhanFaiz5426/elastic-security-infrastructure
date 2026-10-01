@@ -38,7 +38,7 @@ The guide covers the core Elastic SIEM deployment plus optional integration poin
 | [Phase 7 — Deploy Linux & macOS Endpoint Agents](#phase-7--deploy-linux--macos-endpoint-agents) | Enroll Linux and macOS hosts |
 | [Windows Host Prerequisites](#windows-host-prerequisites) | Sysmon, PowerShell logging, Defender, audit policy |
 | [Linux Host Prerequisites](#linux-host-prerequisites) | Authentication logging, agent verification |
-| [Detection Rules](#detection-rules) | Prebuilt rule enablement and telemetry chain |
+| [Detection Rules](#detection-rules) | Prebuilt rule reconciliation and telemetry chain |
 | [Configuration Reference](#configuration-reference) | `.env` variable table |
 | [Dependency Map](#dependency-map) | Variable dependency relationships |
 | [Secret Rotation & Credential Management](#secret-rotation--credential-management) | Credential lifecycle and rotation procedures |
@@ -683,9 +683,9 @@ LinuxDR=0
 MacOSDR=0
 ```
 
-> **What they do:** Bulk-enable prebuilt detection rules by OS during first start. Prebuilt rules are always installed; these flags only control whether they are enabled.
+> **What they do:** Reconcile prebuilt detection rules by OS on **every** stack start (not only the first). Prebuilt rules are always installed; these flags only control whether rules are enabled or disabled: `1` enables matching rules, `0` disables them.
 
-Set to `1` to enable, `0` to leave disabled.
+Set to `1` to enable, `0` to disable. After changing a flag, run `./elastic-container.sh start` again — reconciliation is idempotent and only applies differences.
 
 > [!NOTE]
 > Detection rules consume telemetry. Enabling Windows detection rules is only useful if you have Windows agents enrolled and producing the relevant telemetry (Sysmon, PowerShell, etc.).
@@ -755,7 +755,7 @@ docker compose config --quiet
 > 7. Kibana starts with TLS
 > 8. Fleet Server starts via `fleet-entrypoint.sh` (checks for existing enrollment before re-enrolling)
 > 9. Detection Engine is enabled in Kibana
-> 10. Prebuilt detection rules are installed; OS-specific rules are enabled per `WindowsDR`/`LinuxDR`/`MacOSDR`
+> 10. Prebuilt detection rules are installed; rule state is reconciled per `WindowsDR`/`LinuxDR`/`MacOSDR` (`1` enables, `0` disables)
 > 11. Fleet output is configured (Elasticsearch URL, CA fingerprint, TLS mode)
 > 12. Fleet Server host URL is configured for remote agent enrollment
 > 13. Fleet agent policies are created (idempotent — existing policies are reused):
@@ -1454,8 +1454,8 @@ sudo ./elastic-agent install \
 2. Linux System metrics + logs appear in `metrics-system.*` / `logs-system.*`; Elastic
    Defend events in `logs-endpoint.*`. Verify as in Step 6.6.
 3. Detection rules: Linux rules require `LinuxDR=1` in `.env`; macOS rules require
-   `MacOSDR=1`. These are applied at first stack start, so enabling them now requires a
-   rebuild (or manually enabling rules in Kibana).
+   `MacOSDR=1`. Rule state is reconciled with these flags on every start, so set the
+   flag and run `./elastic-container.sh start` again — no rebuild needed.
 
 **Common enrollment failures:** reuse the troubleshooting table in Step 6.5 — the same
 causes apply (TLS/CA trust, wrong token, Fleet Server not reachable on port `8220`).
@@ -1648,13 +1648,24 @@ In Kibana: **Fleet → Agents** shows the host as **Healthy** on the `Linux Endp
 
 # DETECTION RULES
 
-The repository can bulk-enable prebuilt Elastic detection rules at first start, controlled by flags in `.env`:
+The repository installs Elastic's prebuilt detection rules and **reconciles** their enabled/disabled state with flags in `.env` on every stack start (not only the first):
 
 | Flag | Effect |
 |---|---|
-| `WindowsDR=1` | Enables prebuilt rules tagged `Windows` or `OS: Windows` |
-| `LinuxDR=1` | Enables prebuilt rules tagged `Linux` or `OS: Linux` |
-| `MacOSDR=1` | Enables prebuilt rules tagged `macOS` or `OS: macOS` |
+| `WindowsDR=1` | Rules tagged `Windows` or `OS: Windows` are enabled |
+| `WindowsDR=0` | Those rules are disabled (if currently enabled) |
+| `LinuxDR=1` | Rules tagged `Linux` or `OS: Linux` are enabled |
+| `LinuxDR=0` | Those rules are disabled (if currently enabled) |
+| `MacOSDR=1` | Rules tagged `macOS` or `OS: macOS` are enabled |
+| `MacOSDR=0` | Those rules are disabled (if currently enabled) |
+
+How reconciliation works:
+
+- Exact OS-tag membership only (whole tags such as `Windows`/`OS: Windows` — substring tags are never matched).
+- A rule with several OS tags stays enabled while **any** of its owning flags is `1`; it is disabled only when none of them is `1`.
+- Rules with no OS tag — including the package-default `Endpoint Security (Elastic Defend)` — are never touched; package-defined state is preserved.
+- Only differences are applied (ids-scoped bulk enable/disable): a configuration that already matches writes nothing, so repeated starts are idempotent and do not churn rule `updated_at` timestamps.
+- Prebuilt rules are (re)installed through the prepackaged-rules API on every start, which also reconciles the installed `security_detection_engine` package with what Elastic ships (installed package versions may briefly differ from Kibana's bundled versions — this is expected Elastic behavior, no version pinning is applied).
 
 **Detection rules do NOT collect telemetry.** They consume telemetry provided by integrations. The chain is:
 
@@ -1667,7 +1678,7 @@ For example:
 - PowerShell detection rules targeting Event ID 4104 require Script Block Logging enabled on Windows AND the PowerShell Operational stream ingested via the Windows integration
 - Endpoint detection rules require Elastic Defend telemetry → requires the Elastic Defend integration on the agent policy
 
-Enabling a detection rule without the corresponding telemetry pipeline simply means the rule will never fire (no matching data to trigger on).
+Enabling a detection rule without the corresponding telemetry pipeline simply means the rule will never fire (no matching data to trigger on). Enabled rules whose data streams are not deployed are expected to show `Unable to find matching indices` warnings or execution failures in Kibana — install the matching integration to resolve them; do not disable the rule or drop OS coverage for that reason.
 
 ---
 
@@ -1687,9 +1698,9 @@ Enabling a detection rule without the corresponding telemetry pipeline simply me
 | `KIBANA_PASSWORD` | **Yes** | — | Password for `KIBANA_USERNAME` |
 | `KIBANA_ENCRYPTION_KEY` | **Yes** | — | Kibana saved object encryption (alert rules, connectors, etc.) |
 | `STACK_VERSION` | No | `9.5.0` | Elasticsearch / Kibana / Elastic Agent image version |
-| `WindowsDR` | No | `1` | Enable Windows detection rules at first start |
-| `LinuxDR` | No | `0` | Enable Linux detection rules at first start |
-| `MacOSDR` | No | `0` | Enable macOS detection rules at first start |
+| `WindowsDR` | No | `1` | Enable (`1`) / disable (`0`) Windows detection rules; reconciled on every start |
+| `LinuxDR` | No | `0` | Enable (`1`) / disable (`0`) Linux detection rules; reconciled on every start |
+| `MacOSDR` | No | `0` | Enable (`1`) / disable (`0`) macOS detection rules; reconciled on every start |
 
 ### Authentication overview
 
@@ -1733,13 +1744,13 @@ STACK_VERSION
   └── Elastic component / package version alignment
 
 WindowsDR
-  └── Windows detection-rule enablement
+  └── Windows detection-rule state (reconciled on every start)
 
 LinuxDR
-  └── Linux detection-rule enablement
+  └── Linux detection-rule state (reconciled on every start)
 
 MacOSDR
-  └── macOS detection-rule enablement
+  └── macOS detection-rule state (reconciled on every start)
 ```
 
 > [!WARNING]
