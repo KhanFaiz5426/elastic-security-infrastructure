@@ -256,6 +256,13 @@ services:
     restart: always
     environment:
       - SERVER_NAME=ecp-kibana
+      # SIEM_IP and CA_FINGERPRINT are referenced as ${...} in kibana.yml
+      # (Fleet output / Fleet Server host URLs + ca_trusted_fingerprint).
+      # Kibana's config loader substitutes ${VAR} from the container
+      # environment and throws on unknown variables, so both must be passed
+      # in explicitly from .env.
+      - SIEM_IP=${SIEM_IP}
+      - CA_FINGERPRINT=${CA_FINGERPRINT}
       - ELASTICSEARCH_HOSTS=https://ecp-elasticsearch:9200
       - ELASTICSEARCH_USERNAME=${KIBANA_USERNAME:-kibana_system}
       - ELASTICSEARCH_PASSWORD=${KIBANA_PASSWORD}
