@@ -92,7 +92,20 @@ Set at minimum: `SIEM_IP`, `ELASTIC_PASSWORD`, `KIBANA_PASSWORD`, `KIBANA_ENCRYP
 
 Wait for `READY SET GO!` output (2–5 minutes).
 
-**6. Verify:**
+**6. Set the Fleet CA fingerprint** (required once — the CA only exists after first start):
+
+```bash
+docker cp ecp-elasticsearch:/usr/share/elasticsearch/config/certs/ca/ca.crt /tmp/ca.crt
+echo CA_FINGERPRINT=$(openssl x509 -in /tmp/ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d :)
+```
+
+Paste the output into `.env` as `CA_FINGERPRINT=<value>`, then recreate Kibana so the Fleet preconfiguration picks it up:
+
+```bash
+docker compose up -d --no-deps kibana
+```
+
+**7. Verify:**
 
 ```bash
 ./elastic-container.sh status
@@ -100,7 +113,7 @@ Wait for `READY SET GO!` output (2–5 minutes).
 
 All three containers should show `Up (healthy)` or `Up`.
 
-**7. Access Kibana:** Browse to `https://<YOUR_SIEM_IP>:5601`
+**8. Access Kibana:** Browse to `https://<YOUR_SIEM_IP>:5601`
 
 > [!NOTE]
 > The Quick Start skips prerequisite checks, certificate export, endpoint enrollment, telemetry verification, and detection-rule configuration. The full procedure in the detailed phases below covers all of these.
@@ -111,7 +124,7 @@ All three containers should show `Up (healthy)` or `Up`.
 
 | Scenario | Action |
 |---|---|
-| **SIEM_IP changed** | Clean rebuild required (certificates contain the old IP in SANs) |
+| **SIEM_IP changed** | Clean rebuild required (certificates contain the old IP in SANs); recompute `CA_FINGERPRINT` after the rebuild |
 | **Credentials compromised** | Clean rebuild recommended |
 | **Stack version upgrade** | Run `./elastic-container.sh update-version`, then clean rebuild |
 | **Corrupt state / troubleshooting** | Clean rebuild |
@@ -133,6 +146,9 @@ All three containers should show `Up (healthy)` or `Up`.
 - Removes Fleet Server enrollment state
 - Stack is initialized from scratch on next `start`
 - Previously enrolled agents must be re-enrolled (they will lose contact with the rebuilt Fleet Server)
+
+> [!IMPORTANT]
+> A clean rebuild generates a **new CA**. After the stack is up, recompute `CA_FINGERPRINT` in `.env` (command documented in the template and in [Step 2.3](#ca_fingerprint-fill-after-first-start)), then run `docker compose up -d --no-deps kibana`. Endpoints must also receive the new `ca.crt` before re-enrollment.
 
 ---
 
@@ -665,6 +681,25 @@ KIBANA_ENCRYPTION_KEY=<PASTE_YOUR_GENERATED_KEY>
 
 ---
 
+### CA_FINGERPRINT (fill AFTER first start)
+
+```
+CA_FINGERPRINT=
+```
+
+> **What to put here:** Leave empty before the first start — the CA does not exist yet (the setup container generates it on first boot). After the stack is up, compute it:
+
+```bash
+docker cp ecp-elasticsearch:/usr/share/elasticsearch/config/certs/ca/ca.crt /tmp/ca.crt
+echo CA_FINGERPRINT=$(openssl x509 -in /tmp/ca.crt -noout -fingerprint -sha256 | cut -d= -f2 | tr -d :)
+```
+
+Paste the output into `.env`, then apply: `docker compose up -d --no-deps kibana`.
+
+> **Why it matters:** Kibana substitutes `${CA_FINGERPRINT}` into `kibana.yml` at boot and seeds the Fleet default Elasticsearch output with it (`ca_trusted_fingerprint`), so agents can verify the SIEM's TLS certificates. Without it (or with a stale value after cert regeneration), agents cannot establish monitoring outputs and Fleet shows as degraded. Recompute whenever certificates are regenerated — see [Clean Rebuild vs Normal Restart](#clean-rebuild-vs-normal-restart).
+
+---
+
 ### STACK_VERSION
 
 ```
@@ -756,8 +791,8 @@ docker compose config --quiet
 > 8. Fleet Server starts via `fleet-entrypoint.sh` (checks for existing enrollment before re-enrolling)
 > 9. Detection Engine is enabled in Kibana
 > 10. Prebuilt detection rules are installed; rule state is reconciled per `WindowsDR`/`LinuxDR`/`MacOSDR` (`1` enables, `0` disables)
-> 11. Fleet output is configured (Elasticsearch URL, CA fingerprint, TLS mode)
-> 12. Fleet Server host URL is configured for remote agent enrollment
+> 11. Fleet output is preconfigured at Kibana boot from `kibana.yml` (Elasticsearch URL, CA fingerprint) using `${SIEM_IP}` / `${CA_FINGERPRINT}`; the start script additionally (re)applies it via the Fleet API when it reaches the "Populating Fleet Settings." step
+> 12. Fleet Server host URL is configured the same way for remote agent enrollment
 > 13. Fleet agent policies are created (idempotent — existing policies are reused):
 >     - **Windows Endpoint** (System + Elastic Defend + Windows integration)
 >     - **Endpoint Baseline** (System + Elastic Defend)
@@ -875,6 +910,24 @@ Login with:
 Navigate to **Fleet → Settings**. Verify:
 - **Fleet Server hosts:** `https://<YOUR_SIEM_IP>:8220`
 - **Elasticsearch output:** `https://<YOUR_SIEM_IP>:9200`
+- **Elasticsearch output → CA trusted fingerprint:** matches `CA_FINGERPRINT` in your `.env`
+
+> [!NOTE]
+> Kibana's own Fleet setup (`KIBANA_FLEET_SETUP=1`) seeds the Elasticsearch output as `http://localhost:9200` on first boot — the wrong address for agents. This repository prevents that via Fleet preconfiguration in `kibana.yml` (`xpack.fleet.agents.*` from `${SIEM_IP}` / `${CA_FINGERPRINT}`), which Kibana re-applies on every boot, plus an API fix-up during `./elastic-container.sh start`. If Settings shows `localhost:9200`, an empty fingerprint, or agents log connection-refused monitoring errors, ensure `.env` has the correct `SIEM_IP`/`CA_FINGERPRINT` and run `docker compose up -d --no-deps kibana`.
+
+**API verification:**
+
+```bash
+curl -sk -u "${ELASTIC_USERNAME:-elastic}:<YOUR_PASSWORD>" \
+  "https://127.0.0.1:5601/api/fleet/outputs" \
+  -H "kbn-xsrf: kibana" | jq '.items[] | {hosts, ca_trusted_fingerprint}'
+```
+
+```bash
+curl -sk -u "${ELASTIC_USERNAME:-elastic}:<YOUR_PASSWORD>" \
+  "https://127.0.0.1:5601/api/fleet/fleet_server_hosts" \
+  -H "kbn-xsrf: kibana" | jq '.items[] | {name, host_urls}'
+```
 
 ---
 
@@ -951,6 +1004,9 @@ openssl x509 -in ~/ca.crt -noout -subject -issuer
 ```
 
 > **Success:** Shows the CA subject and issuer (self-signed, so they match).
+
+> [!NOTE]
+> This is the same CA whose SHA-256 fingerprint must be set as `CA_FINGERPRINT` in `.env` (see [Step 2.3](#ca_fingerprint-fill-after-first-start)). If the fingerprints differ, the file is stale — do not use it.
 
 **Transfer `ca.crt` to the Windows host.**
 
@@ -1697,6 +1753,7 @@ Enabling a detection rule without the corresponding telemetry pipeline simply me
 | `KIBANA_USERNAME` | No | `kibana_system` | Kibana ↔ Elasticsearch internal service credential |
 | `KIBANA_PASSWORD` | **Yes** | — | Password for `KIBANA_USERNAME` |
 | `KIBANA_ENCRYPTION_KEY` | **Yes** | — | Kibana saved object encryption (alert rules, connectors, etc.) |
+| `CA_FINGERPRINT` | **Yes** (after first start) | — | Fleet default output `ca_trusted_fingerprint` via `kibana.yml` preconfiguration; recompute after cert regeneration |
 | `STACK_VERSION` | No | `9.5.0` | Elasticsearch / Kibana / Elastic Agent image version |
 | `WindowsDR` | No | `1` | Enable (`1`) / disable (`0`) Windows detection rules; reconciled on every start |
 | `LinuxDR` | No | `0` | Enable (`1`) / disable (`0`) Linux detection rules; reconciled on every start |
@@ -1739,6 +1796,9 @@ KIBANA_PASSWORD
 
 KIBANA_ENCRYPTION_KEY
   └── Kibana encrypted saved objects (alert rules, connectors, etc.)
+
+CA_FINGERPRINT
+  └── Fleet default output ca_trusted_fingerprint (kibana.yml preconfiguration)
 
 STACK_VERSION
   └── Elastic component / package version alignment
