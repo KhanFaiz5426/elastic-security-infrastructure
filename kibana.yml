@@ -16,5 +16,13 @@ xpack.fleet.agentPolicies:
       - name: fleet_server-1
         package:
           name: fleet_server
+# Boot-time preconfiguration for Fleet. KIBANA_FLEET_SETUP=1 seeds the default
+# Elasticsearch output as http://localhost:9200 on first boot; these lines
+# overwrite that before Fleet Settings are populated so agents never dial
+# localhost. Hardcoded IP because kibana.yml cannot read SIEM_IP; update the
+# fingerprint if the deployment CA/certs are regenerated.
+xpack.fleet.agents.elasticsearch.hosts: ["https://192.168.187.137:9200"]
+xpack.fleet.agents.elasticsearch.ca_trusted_fingerprint: "337AA905C0613DF8BF21F993EAEDCADB90735C9C1C7C5A37D4687197A8A74AB5"
+xpack.fleet.agents.fleet_server.hosts: ["https://192.168.187.137:8220"]
 
 
